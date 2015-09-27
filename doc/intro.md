@@ -2,10 +2,11 @@
 
 * *master password*: a password needed to decrypt the password manager database.
 * *site password*: password stored by the password manager.
+* *||*: concatenation of byte strings.
 
 ## Security model
 
-pwman is designed to be secure in the models described by
+pow is designed to be secure in the models described by
 [Gasti and Rasmussen](http://www.cs.ox.ac.uk/files/6487/pwvault.pdf).
 
 Specifically, we aim to ensure that our adversary cannot:
@@ -23,16 +24,23 @@ The adversary can:
 
 ## System requirements
 
-pwman must:
+pow must:
 
 * *work across multiple devices*: Android devices, Linux and OS-X console, Windows desktop, and a modern web browser.
-* *support syncing with web-connected storage* with extra protection against the risks in this storage.
+* *support syncing with web-connected storage* with extra protection against the risks introduced by this storage.
 * *work offline*.
 * *correctly track changes made over multiple devices* when syncing.
 * *use modern cryptography*.
 * *not expose passwords to the server when used from a web browser*. (note: this does not address the fundamental problem of serving trustworthy javascript to a web browser from an untrusted server.  It is more a case of hygiene and server complexity.)
 
-## Building blocks
+## Design
+### Encodings
+All structures are encoded with JSON.  All text of a JSON encoding is itself encoded
+with UTF8 (recall that JSON is defined in terms of unicode codepoints, and therefore
+isn't something that can be sent over the network outwith some text encoding).
+
+Passwords and other strings are stored normalised to NFC.
+
 ### Password based encryption
 
 Our PBE is built from the following pieces:
@@ -43,47 +51,77 @@ Our PBE is built from the following pieces:
 
 The iteration count for PBKDF2 is described alongside each usage of this PBE.
 
-#### Encryption
+#### Key derivation
 
 Inputs:
-- `password`
-- `salt`
-- `plaintext`
+* `password`
+* `salt`
 
 Outputs:
-- `ciphertext`
-- `nonce`
-- `tag`
+* `Ke`
+* `Ks`
 
 1. Apply `PBKDF2-HMAC-SHA256` to the input `password` and `salt` to produce a 32-byte intermediate key `K`.
 2. Derive 32-byte encryption and signing keys `Ke` and `Ks`:
    use `K` as a `HMAC-SHA256` key and sign the messages `encrypt\0` (the bytes `656e637279707400`)
    and `sign\0` (the bytes `7369676e00`) respectively.
-3. Choose a random 8-byte `nonce`.  Use ChaCha20 with this and `Ke` to encrypt the `plaintext` to yield the `ciphertext`.
-4. `HMAC-SHA256` sign `nonce || ciphertext` using the key `Ks`; this is the output `tag`.
+
+#### Encryption
+
+Inputs:
+* `password`
+* `salt`
+* `plaintext`
+* `Ke`
+* `Ks`
+
+Outputs:
+* `ciphertext`
+* `nonce`
+* `tag`
+
+1. Choose a random 8-byte `nonce`.
+2. Use ChaCha20 with `Ke` and the chosen `nonce` to encrypt the `plaintext` to yield the `ciphertext`.
+3. `HMAC-SHA256` sign `nonce || ciphertext` using the key `Ks`; this is the output `tag`.
 
 #### Decryption
 Inputs:
-- `password`
-- `salt`
-- `ciphertext`
-- `nonce`
-- `tag`
+* `password`
+* `salt`
+* `ciphertext`
+* `nonce`
+* `tag`
+* `Ke`
+* `Ks`
 
 Output:
-- `plaintext` or an error
+* `plaintext` or an error
 
-1. Derive `Ke` and `Ks` as for encryption.
-2. Verify `tag` against `nonce || ciphertext` using `Ks`, in constant time.  If this verification fails, yield an error and stop.
-3. Decrypt the `ciphertext` to yield the `plaintext`, using `Ke` and the `nonce`.
+1. Verify `tag` against `nonce || ciphertext` using `Ks`, in constant time.  If this verification fails, yield an error and stop.
+2. Decrypt the `ciphertext` to yield the `plaintext`, using `Ke` and the `nonce`.
 
 ### Plaintext padding
 Our adversary can see the length of our ciphertexts.  We wish to disguise the length
 of the database, especially over additions, updates and deletions.
 
-We choose a message length that all plaintext inputs to the PBE are padded to a multiple of.
-For example, if we choose 4096 bytes, then all plaintexts are padded to 4096, 8192, 12288, ... bytes.
+We choose a message length that plaintext inputs to the PBE are padded to a multiple of.
+For example, if we choose 4096 bytes, then plaintexts are padded to 4096, 8192, 12288, ... bytes.
 The padding is a single `0x80` byte followed by zero or more `0x00` bytes to make the plaintext
 the right size.  This is the same as ISO7816-4 padding.
 
+### Operational security
+We want good operational security when performing a typical operation, like listing available sites.
+We therefore encrypt site passwords before storing them in the database; this is done with padding
+to hide the exact password length.
+
+The whole database is encrypted similarly to give the desired metadata security.
+
+### Versioning
+The server provides storage of `(version, database-ciphertext)` tuples.  `version`s are monotonically
+increasing integers.  To accept a new `database-ciphertext`, the server requires the previous version
+number; the update is rejected if the previous version number is not the latest.  In this case, the
+client obtains the latest version from the server and replays the changes it made onto it, then sends
+the result to the server.
+
+This is designed to prevent updates to an old version obliterating newer versions.
 
