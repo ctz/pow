@@ -54,12 +54,14 @@ The iteration count for PBKDF2 is described alongside each usage of this PBE.
 #### Key derivation
 
 Inputs:
-* `password`
-* `salt`
+
+- `password`
+- `salt`
 
 Outputs:
-* `Ke`
-* `Ks`
+
+- `Ke`
+- `Ks`
 
 1. Apply `PBKDF2-HMAC-SHA256` to the input `password` and `salt` to produce a 32-byte intermediate key `K`.
 2. Derive 32-byte encryption and signing keys `Ke` and `Ks`:
@@ -69,16 +71,16 @@ Outputs:
 #### Encryption
 
 Inputs:
-* `password`
-* `salt`
-* `plaintext`
-* `Ke`
-* `Ks`
+
+- `plaintext`
+- `Ke`
+- `Ks`
 
 Outputs:
-* `ciphertext`
-* `nonce`
-* `tag`
+
+- `ciphertext`
+- `nonce`
+- `tag`
 
 1. Choose a random 8-byte `nonce`.
 2. Use ChaCha20 with `Ke` and the chosen `nonce` to encrypt the `plaintext` to yield the `ciphertext`.
@@ -86,16 +88,16 @@ Outputs:
 
 #### Decryption
 Inputs:
-* `password`
-* `salt`
-* `ciphertext`
-* `nonce`
-* `tag`
-* `Ke`
-* `Ks`
+
+- `ciphertext`
+- `nonce`
+- `tag`
+- `Ke`
+- `Ks`
 
 Output:
-* `plaintext` or an error
+
+- `plaintext` or an error
 
 1. Verify `tag` against `nonce || ciphertext` using `Ks`, in constant time.  If this verification fails, yield an error and stop.
 2. Decrypt the `ciphertext` to yield the `plaintext`, using `Ke` and the `nonce`.
