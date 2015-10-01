@@ -2,7 +2,7 @@
 
 * *master password*: a password needed to decrypt the password manager database.
 * *site password*: password stored by the password manager.
-* *||*: concatenation of byte strings.
+* `||`: concatenation of byte strings.
 
 ## Security model
 
@@ -127,3 +127,10 @@ the result to the server.
 
 This is designed to prevent updates to an old version obliterating newer versions.
 
+### Parameter choice
+Passwords are padded to 64-byte boundaries.
+
+Databases are padded to 2048-byte boundaries.
+
+2<sup>22</sup> PBKDF2 iterations are used when saving for storage in the cloud.
+2<sup>18</sup> PBKDF2 iterations are used when saving locally.
