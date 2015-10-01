@@ -1,1 +1,1 @@
-pwman is a password manager.
+*pow* is a password manager.
