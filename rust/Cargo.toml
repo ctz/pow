@@ -1,0 +1,10 @@
+[package]
+name = "pow"
+version = "0.0.0"
+
+[dependencies]
+rustc-serialize = "0.3"
+rust-crypto = "0.2"
+rand = "0.3"
+fastpbkdf2 = "0.1"
+time = "0.1"
