@@ -34,12 +34,11 @@ pow must:
 * *not expose passwords to the server when used from a web browser*. (note: this does not address the fundamental problem of serving trustworthy javascript to a web browser from an untrusted server.  It is more a case of hygiene and server complexity.)
 
 ## Design
-### Encodings
+### Text encodings
 All structures are encoded with JSON.  All text of a JSON encoding is itself encoded
 with UTF8 (recall that JSON is defined in terms of unicode codepoints, and therefore
-isn't something that can be sent over the network outwith some text encoding).
-
-Passwords and other strings are stored normalised to NFC.
+isn't something that can be sent over the network or written to a file
+outwith some text encoding).
 
 ### Password based encryption
 
@@ -134,3 +133,49 @@ Databases are padded to 2048-byte boundaries.
 
 2<sup>22</sup> PBKDF2 iterations are used when saving for storage in the cloud.
 2<sup>18</sup> PBKDF2 iterations are used when saving locally.
+
+### Database structure and operations
+#### Encryption
+We encrypt JSON values with the following operations:
+
+1. unicode-codepoints <- `JSON-encode`(value)
+2. json-bytes <- `UTF8-encode`(unicode-codepoints)
+3. bytes <- `pad`(json-bytes)
+4. ciphertext <- `encrypt`(bytes)
+
+#### Ciphertexts
+Ciphertexts are stored as JSON objects with precisely the following keys:
+
+- `cipher` (str): base64-encoded ciphertext.
+- `nonce` (str): base64-encoded nonce.
+- `tag` (str): base64-encoded HMAC tag.
+
+#### Sites
+JSON objects with the following mandatory elements:
+
+- `ciphers` is a map from names to `ciphertext` encodings.  Names are (for example) 'password', 'secret question answer'; at the choice of the user.  These ciphertexts result from encrypting the JSON strings of the secret in question.
+- `name` is a user-chosen string naming the site in question (like 'Google').
+- `created` is a UNIX timestamp (i.e. non-leap seconds since 1970, measured in UTC) encoded as an integer for when this entry was first created.
+- `updated` is another UNIX timestamp for when this entry was last updated.
+
+Additionally, and optionally, `url` and `comment` are strings describing the site.  Any other items are allowed also.
+
+#### KDF inputs
+A JSON structure with plaintext inputs to the KDF in use.
+
+- `kdf` is the name of the KDF in use.  `"pbkdf2-hmac-sha256"` is the only supported value; this is an extension point for future KDFs.
+- `salt` is the base64-encoded random salt.
+- `iter` is the iteration counter for PBKDF2.
+
+#### Database
+At the outermost level, a database is a JSON object with:
+
+- `kdf`: a KDF inputs encoding.
+- `cipher`: an encryption of the plaintext database encoding.
+
+The database encoding is:
+
+- `version`: an integer which should increase each time an update is made.
+- `sites`: a mapping of site names to site encodings.
+
+Other items are allowed and also encrypted; they must be maintained across edits.
