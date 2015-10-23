@@ -6,6 +6,7 @@ import hmac
 import base64
 import datetime
 import chacha
+from hkdf import expand as hkdf_expand
 
 SALT_LENGTH = 16
 PBKDF2_ITERATIONS = 2 ** 18
@@ -24,11 +25,16 @@ def b64_encode(b):
 def b64_decode(s):
     return base64.b64decode(s.encode('utf8'))
 
+def bhex(b):
+    return ''.join(['%02x' % x for x in b])
+
 def now():
-    return datetime.datetime.now().isoformat()
+    return int(datetime.datetime.utcnow().timestamp())
 
 # Crypto
 class secrets:
+    TYPE = 'pbkdf2-hmac-sha256'
+
     @staticmethod
     def fresh():
         s = secrets()
@@ -39,18 +45,26 @@ class secrets:
     @staticmethod
     def decode(enc):
         s = secrets()
+        assert enc['kdf'] == secrets.TYPE
         s.salt = b64_decode(enc['salt'])
         s.iterations = enc['iter']
         return s
 
-    def derive_keys(self, password_bytes):
-        master = pbkdf2_hmac('sha256', password_bytes, self.salt, self.iterations)
-        self.ke = hmac.new(master, b'encrypt\0', sha256).digest()
-        self.ks = hmac.new(master, b'sign\0', sha256).digest()
+    def derive_key(self, password_bytes):
+        self.master = pbkdf2_hmac('sha256', password_bytes, self.salt, self.iterations)
         return self
 
+    def keys_for_db(self):
+        return self.keys_for_site('')
+
+    def keys_for_site(self, name):
+        # build a 64-byte string specific for this site name.
+        keys = hkdf_expand(sha256, self.master, name.encode('utf8'), 64)
+        # first half is conf key, second half is auth
+        return keys[:32], keys[32:]
+
     def encode(self):
-        return dict(salt = b64_encode(self.salt), iter = self.iterations)
+        return dict(salt = b64_encode(self.salt), iter = self.iterations, kdf = secrets.TYPE)
 
     def __eq__(self, other):
         return self.__dict__ == other.__dict__
@@ -75,10 +89,10 @@ class crypto:
     padding_database = lambda pt: crypto.pad(pt, 2048)
 
     @staticmethod
-    def encrypt_json(js, sec, padding):
+    def encrypt_json(js, keys, padding):
         """
-        Encrypt the json-encodable object js using the secrets
-        stored in the sec secrets object.
+        Encrypt the json-encodable object js using the keys
+        provided (get these from a secrets object).
 
         This returns a dict with items for the things you need
         to decrypt.
@@ -86,8 +100,9 @@ class crypto:
         nonce = os.urandom(8)
         plain = json.dumps(js).encode('utf8')
         plain = padding(plain)
-        cipher = chacha.chacha20_cipher(sec.ke, nonce, plain)
-        tag = hmac.new(sec.ks, nonce + cipher, sha256).digest()
+        kconf, kauth = keys
+        cipher = chacha.chacha20_cipher(kconf, nonce, plain)
+        tag = hmac.new(kauth, nonce + cipher, sha256).digest()
         return dict(
                 tag = b64_encode(tag),
                 cipher = b64_encode(cipher),
@@ -95,18 +110,19 @@ class crypto:
                 )
 
     @staticmethod
-    def decrypt_json(enc, sec):
+    def decrypt_json(enc, keys):
         """
         Takes the object returned by encrypt_json earlier, and returns
-        the original input object using the keys in the sec secrets object.
+        the original input object using the given keys.
         """
         nonce, cipher, tag = map(b64_decode, [enc['nonce'], enc['cipher'], enc['tag']])
-        ourtag = hmac.new(sec.ks, nonce + cipher, sha256).digest()
+        kconf, kauth = keys
+        ourtag = hmac.new(kauth, nonce + cipher, sha256).digest()
 
         if len(nonce) != 8 or not hmac.compare_digest(ourtag, tag):
             raise IOError('corrupt ciphertext')
 
-        plain = chacha.chacha20_cipher(sec.ke, nonce, cipher)
+        plain = chacha.chacha20_cipher(kconf, nonce, cipher)
         plain = crypto.unpad(plain)
         return json.loads(plain.decode('utf8'))
 
@@ -114,19 +130,18 @@ class crypto:
 class database:
     def __init__(self):
         self.sites = {}
-        self.log = []
         self.loaded_version = 0
 
     @staticmethod
     def decrypt(enc, raw_password):
-        sec = secrets.decode(enc['sec'])
-        sec.derive_keys(canon(raw_password))
+        sec = secrets.decode(enc['kdf'])
+        sec.derive_key(canon(raw_password))
 
-        plain = crypto.decrypt_json(enc['cipher'], sec)
+        keys = sec.keys_for_db()
+        plain = crypto.decrypt_json(enc['cipher'], keys)
         
         db = database()
         db.loaded_version = plain['version']
-        db.log = plain['log']
         db.sites = dict((k, site.decode(v)) for k, v in plain['sites'].items())
         return sec, db
 
@@ -136,19 +151,16 @@ class database:
 
         site.was_updated()
         self.sites[site.name] = site
-        self.log.append(['add', site.name])
 
     def update_site(self, site):
         assert site.name in self.sites
         site.was_updated()
         self.sites[site.name] = site
-        self.log.append(['update', site.name])
 
     def del_site(self, name):
         if name not in self.sites:
             return
         del self.sites[name]
-        self.log.append(['del', name])
 
     def get_site(self, name):
         return self.sites[name]
@@ -160,15 +172,15 @@ class database:
         """
         data = dict(
                 sites = dict((k, v.encode()) for k, v in self.sites.items()),
-                log = self.log,
                 version = self.loaded_version + 1
                 )
         
-        cipher = crypto.encrypt_json(data, sec, crypto.padding_database)
+        keys = sec.keys_for_db()
+        cipher = crypto.encrypt_json(data, keys, crypto.padding_database)
 
         return dict(
                 cipher = cipher,
-                sec = sec.encode()
+                kdf = sec.encode()
                 )
 
 class site:
@@ -200,12 +212,14 @@ class site:
 
     def set_password(self, kind, raw_password, sec):
         plain = b64_encode(canon(raw_password))
-        cipher = crypto.encrypt_json(plain, sec, crypto.padding_password)
+        keys = sec.keys_for_site(self.name)
+        cipher = crypto.encrypt_json(plain, keys, crypto.padding_password)
         self.ciphers[kind] = cipher
 
     def get_password(self, kind, sec):
         cipher = self.ciphers[kind]
-        plain = crypto.decrypt_json(cipher, sec)
+        keys = sec.keys_for_site(self.name)
+        plain = crypto.decrypt_json(cipher, keys)
         return b64_decode(plain).decode('utf8')
 
     def was_updated(self):
@@ -225,16 +239,17 @@ if __name__ == '__main__':
     testpw = 'password'
 
     sec = secrets.fresh()
-    sec.derive_keys(canon(testpw))
+    sec.derive_key(canon(testpw))
 
     print(sec.encode())
     assert sec == sec
-    assert secrets.decode(sec.encode()).derive_keys(canon(testpw)) == sec
+    assert secrets.decode(sec.encode()).derive_key(canon(testpw)) == sec
 
     butt = dict(abc = 123)
-    enc = crypto.encrypt_json(butt, sec, crypto.padding_password)
+    keys = sec.keys_for_db()
+    enc = crypto.encrypt_json(butt, keys, crypto.padding_password)
     print(enc)
-    print(crypto.decrypt_json(enc, sec))
+    print(crypto.decrypt_json(enc, keys))
 
     s = site.fresh('google')
     s.set_password('password', 'dumbpassword', sec)
