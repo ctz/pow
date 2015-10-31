@@ -46,11 +46,12 @@ Our PBE is built from the following pieces:
 
 - The `PBKDF2-HMAC-SHA256` password key derivation function.
 - The ChaCha20 stream cipher with 32-byte keys and 8-byte nonces.
-- The `HMAC-SHA256` MAC.
+- The `HMAC-SHA256` MAC with 32-byte keys.
+- The `HKDF-Expand-SHA256` KDF with 32-byte input and 64-byte output.
 
 The iteration count for PBKDF2 is described alongside each usage of this PBE.
 
-#### Key derivation
+#### Password key derivation
 
 Inputs:
 
@@ -59,13 +60,25 @@ Inputs:
 
 Outputs:
 
-- `Ke`
-- `Ks`
+- `Kmaster` master key
 
-1. Apply `PBKDF2-HMAC-SHA256` to the input `password` and `salt` to produce a 32-byte intermediate key `K`.
-2. Derive 32-byte encryption and signing keys `Ke` and `Ks`:
-   use `K` as a `HMAC-SHA256` key and sign the messages `encrypt\0` (the bytes `656e637279707400`)
-   and `sign\0` (the bytes `7369676e00`) respectively.
+1. Apply `PBKDF2-HMAC-SHA256` to the input `password` and `salt` to produce a 32-byte intermediate key `Kmaster`.
+
+### Per-encryption key derivation
+
+Inputs:
+
+- `Kmaster`
+- `domain` usage seperation string
+
+Outputs:
+
+- `Ke` encryption key
+- `Ks` signing key
+
+1. Use `HKDF-Expand-SHA256` with inputs of the master key `Kmaster` and the given `domain`
+   separation string, obtaining a 64-byte output.
+2. Let `Ke` be the first 32 bytes, and `Ks` be the 32-byte remainder of the HKDF output.
 
 #### Encryption
 
@@ -98,7 +111,8 @@ Output:
 
 - `plaintext` or an error
 
-1. Verify `tag` against `nonce || ciphertext` using `Ks`, in constant time.  If this verification fails, yield an error and stop.
+1. Verify `tag` against `nonce || ciphertext` using `Ks`, in constant time.
+   If this verification fails, yield an error and stop.
 2. Decrypt the `ciphertext` to yield the `plaintext`, using `Ke` and the `nonce`.
 
 ### Plaintext padding
@@ -146,9 +160,9 @@ We encrypt JSON values with the following operations:
 #### Ciphertexts
 Ciphertexts are stored as JSON objects with precisely the following keys:
 
-- `cipher` (str): base64-encoded ciphertext.
-- `nonce` (str): base64-encoded nonce.
-- `tag` (str): base64-encoded HMAC tag.
+- `cipher`: base64-encoded ciphertext.
+- `nonce`: base64-encoded nonce.
+- `tag`: base64-encoded HMAC tag.
 
 #### Sites
 JSON objects with the following mandatory elements:
